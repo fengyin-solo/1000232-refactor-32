@@ -50,7 +50,7 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无安防巡视数据，可先登记安防记录</td>
+          <td :colspan="columns.length + 1" class="empty-state">{{ emptyText }}</td>
         </tr>
       </tbody>
     </table>
@@ -65,21 +65,46 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
-import { request } from '@/api/client'
+import { fetchJson, request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
+type Stat = { label: string; value: number }
+type PagePayload = { items: Row[]; total: number }
 
 const ENDPOINT = '/api/security'
 const columns = ["巡视编号", "巡视区域", "巡视人员", "巡视时间", "异常描述", "处理情况", "交接事项", "巡视状态"]
 const actions = ["开始巡视", "记录异常", "完成巡视"]
-const statuses = ["已排班", "巡视中", "正常完成", "发现异常"]
-const stats = [{"label": "今日巡视", "value": 0}, {"label": "异常巡视", "value": 0}, {"label": "待巡视区域", "value": 0}]
+// 筛选条件与后端共用同一套口径：页面字段 -> 查询参数
+const FILTER_PARAMS: Record<string, string> = {
+  巡视编号: 'keyword',
+  巡视区域: 'area',
+  巡视人员: 'operator',
+  交接事项: 'handover',
+}
+const filterFields = Object.keys(FILTER_PARAMS)
+const emptyText = '暂无安防巡视数据，可先登记安防记录'
+const LIST_ERROR_TEXT = '安防巡视列表读取失败'
 
 const rows = ref<Row[]>([])
 const total = ref(0)
+const stats = ref<Stat[]>([
+  { label: '今日巡视', value: 0 },
+  { label: '异常巡视', value: 0 },
+  { label: '待巡视区域', value: 0 },
+])
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+
+function buildQuery(): string {
+  const params = new URLSearchParams()
+  for (const field of filterFields) {
+    const value = filters.value[field]?.trim()
+    if (value) {
+      params.set(FILTER_PARAMS[field], value)
+    }
+  }
+  return params.toString()
+}
 
 function resetFilters() {
   filters.value = {}
@@ -99,10 +124,11 @@ async function runAction(action: string, row: Row) {
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('安防巡视动作未生效，请稍后重试')
+    const result = (await response.json()) as { ok?: boolean; message?: string }
+    if (!response.ok || !result.ok) {
+      throw new Error(result.message || '安防巡视动作未生效，请稍后重试')
     }
     await reload()
   } catch (error) {
@@ -112,17 +138,19 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const query = buildQuery()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
-    if (!response.ok) {
-      throw new Error('安防记录列表读取失败')
-    }
-    const payload = await response.json()
-    rows.value = payload.items ?? []
-    total.value = payload.total ?? rows.value.length
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '安防巡视列表读取失败'
+    const [listPayload, statPayload] = await Promise.all([
+      fetchJson<PagePayload>(`${ENDPOINT}?${query}`),
+      fetchJson<Stat[]>(`${ENDPOINT}/stats?${query}`),
+    ])
+    rows.value = listPayload.items ?? []
+    total.value = listPayload.total ?? rows.value.length
+    stats.value = statPayload
+  } catch {
+    rows.value = []
+    total.value = 0
+    errorMessage.value = LIST_ERROR_TEXT
   }
 }
 

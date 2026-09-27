@@ -3,31 +3,61 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.security import SecurityService
+from app.services.security import STATUS_ORDER, SecurityService
 
 router = APIRouter(prefix="/api/security", tags=["安防巡视"])
 
 service = SecurityService()
 
-LIST_FIELDS = ["巡视编号", "巡视区域", "巡视人员", "巡视时间", "异常描述", "处理情况", "交接事项", "巡视状态"]
-STATUSES = ["已排班", "巡视中", "正常完成", "发现异常"]
+STATUS_HINT = "、".join(STATUS_ORDER)
+
+
+def security_filters(
+    keyword: str | None = Query(default=None, description="按巡视编号检索"),
+    status: str | None = Query(default=None, description=STATUS_HINT),
+    area: str | None = Query(default=None, description="按巡视区域检索"),
+    operator: str | None = Query(default=None, description="按巡视人员检索"),
+    handling: str | None = Query(default=None, description="按处理情况检索"),
+    handover: str | None = Query(default=None, description="按交接事项检索"),
+) -> dict[str, str | None]:
+    """列表与异常统计共用的筛选参数：只收拢查询条件，不做业务判断。"""
+    return {
+        "keyword": keyword,
+        "status": status,
+        "area": area,
+        "operator": operator,
+        "handling": handling,
+        "handover": handover,
+    }
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
-    keyword: str | None = Query(default=None, description="按巡视编号检索"),
-    status: str | None = Query(default=None, description="已排班、巡视中、正常完成、发现异常"),
+    filters: dict[str, str | None] = Depends(security_filters),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按巡视编号与状态过滤安防巡视列表；没有数据时返回空页，不报错。"""
+    """按统一口径过滤安防巡视列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(filters=filters, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/stats")
+def stats(filters: dict[str, str | None] = Depends(security_filters)) -> list[dict[str, Any]]:
+    """异常统计：与列表共用同一份筛选口径和数据来源。"""
+    return service.summarize(filters=filters)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出安防巡视清单：返回全量数据，可见范围与原来一致。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "security", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +86,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出安防巡视清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "security", "total": total, "items": items}
