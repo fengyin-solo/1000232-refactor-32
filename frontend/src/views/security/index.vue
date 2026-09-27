@@ -12,16 +12,44 @@
     </header>
 
     <div class="stat-row">
-      <article v-for="item in stats" :key="item.label" class="stat-card">
+      <article v-for="item in statCards" :key="item.label" class="stat-card">
         <span class="stat-label">{{ item.label }}</span>
         <strong class="stat-value">{{ item.value }}</strong>
       </article>
     </div>
 
-    <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+    <div class="area-row">
+      <article v-for="item in areas" :key="item.area" class="area-card">
+        <strong>{{ item.area }}</strong>
+        <span>巡视 {{ item.total }} 次 · 异常 {{ item.abnormal }} · 待处理 {{ item.pending }}</span>
+        <span>巡视人员：{{ item.inspectors.join('、') || EMPTY_CELL_TEXT }}</span>
+        <span>交接事项：{{ item.handover_items.join('；') || EMPTY_CELL_TEXT }}</span>
+      </article>
+      <p v-if="!areas.length" class="empty-state">暂无巡视区域数据</p>
+    </div>
+
+    <form class="filter-bar" @submit.prevent="applyFilters">
+      <label class="filter-item">
+        <span>巡视编号</span>
+        <input v-model="filters.keyword" placeholder="按巡视编号检索" />
+      </label>
+      <label class="filter-item">
+        <span>巡视区域</span>
+        <select v-model="filters.area">
+          <option value="">全部区域</option>
+          <option v-for="area in areaOptions" :key="area" :value="area">{{ area }}</option>
+        </select>
+      </label>
+      <label class="filter-item">
+        <span>巡视人员</span>
+        <input v-model="filters.inspector" placeholder="按巡视人员检索" />
+      </label>
+      <label class="filter-item">
+        <span>巡视状态</span>
+        <select v-model="filters.status">
+          <option value="">全部状态</option>
+          <option v-for="status in SECURITY_STATUSES" :key="status" :value="status">{{ status }}</option>
+        </select>
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -30,27 +58,27 @@
     <table class="data-table">
       <thead>
         <tr>
-          <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th v-for="column in SECURITY_COLUMNS" :key="column">{{ column }}</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in SECURITY_COLUMNS" :key="column">{{ cellText(row[column]) }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in SECURITY_ACTIONS"
               :key="action"
               class="link"
               type="button"
-              @click="runAction(action, row)"
+              @click="runAction(action, row, filters)"
             >
               {{ action }}
             </button>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无安防巡视数据，可先登记安防记录</td>
+          <td :colspan="SECURITY_COLUMNS.length + 1" class="empty-state">{{ EMPTY_LIST_TEXT }}</td>
         </tr>
       </tbody>
     </table>
@@ -65,66 +93,62 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
-import { request } from '@/api/client'
+import {
+  EMPTY_CELL_TEXT,
+  EMPTY_LIST_TEXT,
+  SECURITY_ACTIONS,
+  SECURITY_COLUMNS,
+  SECURITY_STATUSES,
+  cellText,
+  useSecurityRecords,
+} from './useSecurityRecords'
 
-type Row = Record<string, string | number | null>
+const { rows, total, areas, areaOptions, statCards, errorMessage, refresh, runAction } =
+  useSecurityRecords()
 
-const ENDPOINT = '/api/security'
-const columns = ["巡视编号", "巡视区域", "巡视人员", "巡视时间", "异常描述", "处理情况", "交接事项", "巡视状态"]
-const actions = ["开始巡视", "记录异常", "完成巡视"]
-const statuses = ["已排班", "巡视中", "正常完成", "发现异常"]
-const stats = [{"label": "今日巡视", "value": 0}, {"label": "异常巡视", "value": 0}, {"label": "待巡视区域", "value": 0}]
+const filters = ref<Record<string, string>>({ keyword: '', area: '', inspector: '', status: '' })
 
-const rows = ref<Row[]>([])
-const total = ref(0)
-const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+function applyFilters() {
+  void refresh(filters.value)
+}
 
 function resetFilters() {
-  filters.value = {}
-  void reload()
+  filters.value = { keyword: '', area: '', inspector: '', status: '' }
+  void refresh(filters.value)
 }
 
 function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+  window.open('/api/security/export', '_blank')
 }
 
 function openCreate() {
   errorMessage.value = '安防记录登记入口尚未接入审批流'
 }
 
-async function runAction(action: string, row: Row) {
-  errorMessage.value = ''
-  try {
-    const response = await request(`${ENDPOINT}/${row.id}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({ action }),
-    })
-    if (!response.ok) {
-      throw new Error('安防巡视动作未生效，请稍后重试')
-    }
-    await reload()
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '安防巡视操作失败'
-  }
-}
-
-async function reload() {
-  errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
-  try {
-    const response = await request(`${ENDPOINT}?${query}`)
-    if (!response.ok) {
-      throw new Error('安防记录列表读取失败')
-    }
-    const payload = await response.json()
-    rows.value = payload.items ?? []
-    total.value = payload.total ?? rows.value.length
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '安防巡视列表读取失败'
-  }
-}
-
-onMounted(reload)
+onMounted(() => refresh(filters.value))
 </script>
+
+<style scoped>
+.area-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.area-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.area-card strong {
+  font-size: 13px;
+  color: #1f2937;
+}
+</style>
